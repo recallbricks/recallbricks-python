@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install:*)",
+      "Bash(PYTHONPATH=. python:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(python tests/test_relationships.py:*)",
+      "Bash(python tests/test_stress.py:*)",
+      "Bash(python -m unittest:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(python:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
