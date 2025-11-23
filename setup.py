@@ -5,16 +5,16 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="recallbricks",
-    version="0.1.0",
+    version="1.1.1",
     author="RecallBricks",
     author_email="support@recallbricks.com",
-    description="The Memory Layer for AI - Persistent memory across all AI models",
+    description="Enterprise-Grade Memory Layer for AI - Persistent memory with advanced metacognition",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/recallbricks/recallbricks-python",
     packages=find_packages(),
     classifiers=[
-        "Development Status :: 3 - Alpha",
+        "Development Status :: 5 - Production/Stable",
         "Intended Audience :: Developers",
         "Topic :: Software Development :: Libraries :: Python Modules",
         "License :: OSI Approved :: MIT License",
@@ -23,6 +23,7 @@ setup(
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
     ],
     python_requires=">=3.8",
     install_requires=[

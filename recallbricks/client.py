@@ -6,75 +6,208 @@ The Memory Layer for AI - Persistent memory across all AI models
 import requests
 import functools
 import time
+import re
 from typing import List, Dict, Optional, Any
 from .exceptions import AuthenticationError, RateLimitError, APIError, RecallBricksError
+from .types import (
+    PredictedMemory,
+    SuggestedMemory,
+    LearningMetrics,
+    PatternAnalysis,
+    WeightedSearchResult
+)
 
 
 class RecallBricks:
     """
     RecallBricks client for saving and retrieving AI memories.
-    
-    Usage:
+
+    Usage with API key (user-level access):
         >>> from recallbricks import RecallBricks
-        >>> memory = RecallBricks(api_key="your_api_key")
+        >>> memory = RecallBricks(api_key="rb_dev_xxx")
         >>> memory.save("Important context about the project")
+        >>> memories = memory.get_all()
+
+    Usage with service token (server-to-server access):
+        >>> from recallbricks import RecallBricks
+        >>> memory = RecallBricks(service_token="rbk_service_xxx")
+        >>> # Note: user_id is required when using service token
+        >>> memory.save("Important context", user_id="user_123")
         >>> memories = memory.get_all()
     """
     
-    def __init__(self, api_key: str, base_url: str = "https://recallbricks-api-production.up.railway.app"):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        service_token: Optional[str] = None,
+        base_url: str = "https://recallbricks-api-clean.onrender.com",
+        timeout: int = 30
+    ):
         """
         Initialize RecallBricks client.
-        
+
         Args:
-            api_key: Your RecallBricks API key
+            api_key: Your RecallBricks API key (for user-level access)
+            service_token: Your RecallBricks service token (for server-to-server access)
             base_url: API base URL (default: production)
+            timeout: Request timeout in seconds (default: 30)
+
+        Note:
+            You must provide either api_key or service_token, but not both.
+            - Use api_key for user-level access (X-API-Key header)
+            - Use service_token for server-to-server access (X-Service-Token header)
         """
-        if not api_key:
-            raise AuthenticationError("API key is required")
-        
+        # Validate that exactly one auth method is provided
+        if not api_key and not service_token:
+            raise AuthenticationError("Either api_key or service_token is required")
+
+        if api_key and service_token:
+            raise AuthenticationError("Provide either api_key or service_token, not both")
+
         self.api_key = api_key
+        self.service_token = service_token
         self.base_url = base_url.rstrip('/')
+        self.timeout = timeout
         self.session = requests.Session()
-        self.session.headers.update({
-            'X-API-Key': api_key,
-            'Content-Type': 'application/json'
-        })
+
+        # Set authentication header based on which credential was provided
+        if service_token:
+            self.session.headers.update({
+                'X-Service-Token': service_token,
+                'Content-Type': 'application/json'
+            })
+        else:
+            self.session.headers.update({
+                'X-API-Key': api_key,
+                'Content-Type': 'application/json'
+            })
     
-    def _request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
-        """Make HTTP request to RecallBricks API"""
+    def _sanitize_input(self, value: str, max_length: int = 10000) -> str:
+        """
+        Sanitize string input to prevent injection attacks
+
+        Args:
+            value: Input string to sanitize
+            max_length: Maximum allowed length
+
+        Returns:
+            Sanitized string
+        """
+        if not isinstance(value, str):
+            raise TypeError(f"Expected string, got {type(value).__name__}")
+
+        # Remove null bytes and control characters (except tabs, newlines, carriage returns)
+        sanitized = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', value)
+
+        # Limit length
+        if len(sanitized) > max_length:
+            sanitized = sanitized[:max_length]
+
+        return sanitized
+
+    def _request(self, method: str, endpoint: str, max_retries: int = 3, **kwargs) -> Dict[str, Any]:
+        """
+        Make HTTP request to RecallBricks API with retry logic
+
+        Args:
+            method: HTTP method
+            endpoint: API endpoint
+            max_retries: Maximum retry attempts (default: 3)
+            **kwargs: Additional request parameters
+
+        Returns:
+            API response as dictionary
+        """
         url = f"{self.base_url}{endpoint}"
-        
-        try:
-            response = self.session.request(method, url, **kwargs)
-            
-            # Handle rate limiting
-            if response.status_code == 429:
-                retry_after = response.headers.get('X-RateLimit-Reset')
-                raise RateLimitError(
-                    "Rate limit exceeded. Please try again later.",
-                    retry_after=retry_after
-                )
-            
-            # Handle authentication errors
-            if response.status_code == 401:
-                raise AuthenticationError("Invalid API key")
-            
-            # Handle other errors
-            if response.status_code >= 400:
-                error_data = response.json() if response.content else {}
-                raise APIError(
-                    error_data.get('message', 'API request failed'),
-                    status_code=response.status_code
-                )
-            
-            return response.json() if response.content else {}
-            
-        except requests.exceptions.RequestException as e:
-            raise RecallBricksError(f"Network error: {str(e)}")
+
+        # Set timeout if not specified
+        if 'timeout' not in kwargs:
+            kwargs['timeout'] = self.timeout
+
+        last_exception = None
+
+        for attempt in range(max_retries):
+            try:
+                response = self.session.request(method, url, **kwargs)
+
+                # Handle rate limiting with retry
+                if response.status_code == 429:
+                    retry_after = response.headers.get('X-RateLimit-Reset', '60')
+                    wait_time = min(int(retry_after) if retry_after.isdigit() else 60, 60)
+
+                    if attempt < max_retries - 1:
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        raise RateLimitError(
+                            "Rate limit exceeded. Please try again later.",
+                            retry_after=retry_after
+                        )
+
+                # Handle authentication errors
+                if response.status_code == 401:
+                    raise AuthenticationError("Invalid API key")
+
+                # Handle server errors with retry
+                if response.status_code >= 500:
+                    if attempt < max_retries - 1:
+                        wait_time = (2 ** attempt)  # Exponential backoff: 1s, 2s, 4s
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        error_data = response.json() if response.content else {}
+                        raise APIError(
+                            error_data.get('message', 'Server error'),
+                            status_code=response.status_code
+                        )
+
+                # Handle other client errors
+                if response.status_code >= 400:
+                    try:
+                        error_data = response.json() if response.content else {}
+                    except ValueError:
+                        error_data = {}
+                    raise APIError(
+                        error_data.get('message', 'API request failed'),
+                        status_code=response.status_code
+                    )
+
+                # Parse JSON response
+                try:
+                    return response.json() if response.content else {}
+                except ValueError as e:
+                    raise RecallBricksError(f"Invalid JSON response: {str(e)}")
+
+            except requests.exceptions.Timeout as e:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    wait_time = (2 ** attempt)
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    raise RecallBricksError(f"Request timeout after {max_retries} attempts")
+
+            except requests.exceptions.ConnectionError as e:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    wait_time = (2 ** attempt)
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    raise RecallBricksError(f"Connection error after {max_retries} attempts: {str(e)}")
+
+            except requests.exceptions.RequestException as e:
+                # Other request exceptions - don't retry
+                raise RecallBricksError(f"Network error: {str(e)}")
+
+        # Should not reach here, but just in case
+        if last_exception:
+            raise RecallBricksError(f"Request failed after {max_retries} attempts: {str(last_exception)}")
     
     def save(
         self,
         text: str,
+        user_id: Optional[str] = None,
         source: str = "api",
         project_id: str = "default",
         tags: Optional[List[str]] = None,
@@ -86,6 +219,9 @@ class RecallBricks:
 
         Args:
             text: The memory content to save
+            user_id: User ID to associate with the memory. Required when using
+                    service token authentication. Optional when using API key
+                    authentication (uses authenticated user by default).
             source: Source of the memory (default: "api")
             project_id: Project identifier (default: "default")
             tags: Optional list of tags
@@ -95,14 +231,41 @@ class RecallBricks:
         Returns:
             Dictionary containing the created memory with id, created_at, etc.
 
+        Raises:
+            ValueError: If user_id is required but not provided
+
         Example:
+            >>> # With API key (user_id optional)
             >>> memory.save("User prefers dark mode and TypeScript")
+
+            >>> # With service token (user_id required)
+            >>> memory.save("User prefers dark mode", user_id="user_123")
         """
+        # Validate user_id when using service token
+        if self.service_token and not user_id:
+            raise ValueError(
+                "user_id is required when using service token authentication. "
+                "Please provide a user_id parameter to identify the user."
+            )
+
+        # Validate user_id format if provided
+        if user_id is not None:
+            if not isinstance(user_id, str):
+                raise TypeError(f"user_id must be a string, got {type(user_id).__name__}")
+            if not user_id.strip():
+                raise ValueError("user_id cannot be empty")
+            # Sanitize user_id
+            user_id = self._sanitize_input(user_id, max_length=256)
+
         payload = {
             "text": text,
             "source": source,
             "project_id": project_id,
         }
+
+        # Include user_id in payload if provided
+        if user_id:
+            payload["user_id"] = user_id
 
         if tags:
             payload["tags"] = tags
@@ -361,3 +524,206 @@ class RecallBricks:
 
             return wrapper
         return decorator
+
+    def predict_memories(
+        self,
+        context: Optional[str] = None,
+        recent_memory_ids: Optional[List[str]] = None,
+        limit: int = 10
+    ) -> List[PredictedMemory]:
+        """
+        Predict which memories might be useful based on context and recent usage.
+
+        Args:
+            context: Optional context string for prediction
+            recent_memory_ids: Optional list of recently accessed memory IDs
+            limit: Maximum number of predictions to return (default: 10)
+
+        Returns:
+            List of PredictedMemory objects
+
+        Example:
+            >>> predictions = rb.predict_memories(context="User is working on auth", limit=5)
+            >>> for pred in predictions:
+            >>>     print(f"{pred.content} (confidence: {pred.confidence_score})")
+        """
+        # Input validation and sanitization
+        if limit < 1 or limit > 100:
+            raise ValueError("limit must be between 1 and 100")
+
+        payload = {"limit": limit}
+
+        if context:
+            payload["context"] = self._sanitize_input(context)
+
+        if recent_memory_ids:
+            if not isinstance(recent_memory_ids, list):
+                raise TypeError("recent_memory_ids must be a list")
+            # Validate each ID
+            sanitized_ids = []
+            for mem_id in recent_memory_ids:
+                if not isinstance(mem_id, str):
+                    raise TypeError(f"memory_id must be string, got {type(mem_id).__name__}")
+                sanitized_ids.append(self._sanitize_input(mem_id, max_length=256))
+            payload["recent_memory_ids"] = sanitized_ids
+
+        response = self._request("POST", "/api/v1/memories/predict", json=payload)
+
+        # Parse response into PredictedMemory objects
+        predictions = response.get('predictions', [])
+        return [PredictedMemory.from_dict(p) for p in predictions]
+
+    def suggest_memories(
+        self,
+        context: str,
+        limit: int = 5,
+        min_confidence: float = 0.6,
+        include_reasoning: bool = True
+    ) -> List[SuggestedMemory]:
+        """
+        Get memory suggestions based on current context.
+
+        Args:
+            context: Context string for suggestions
+            limit: Maximum number of suggestions (default: 5)
+            min_confidence: Minimum confidence threshold (default: 0.6)
+            include_reasoning: Include reasoning in response (default: True)
+
+        Returns:
+            List of SuggestedMemory objects
+
+        Example:
+            >>> suggestions = rb.suggest_memories("Building login form", min_confidence=0.7)
+            >>> for sug in suggestions:
+            >>>     print(f"{sug.content} - {sug.reasoning}")
+        """
+        # Input validation
+        if not context:
+            raise ValueError("context is required")
+
+        if limit < 1 or limit > 100:
+            raise ValueError("limit must be between 1 and 100")
+
+        if not 0.0 <= min_confidence <= 1.0:
+            raise ValueError("min_confidence must be between 0.0 and 1.0")
+
+        payload = {
+            "context": self._sanitize_input(context),
+            "limit": limit,
+            "min_confidence": min_confidence,
+            "include_reasoning": include_reasoning
+        }
+
+        response = self._request("POST", "/api/v1/memories/suggest", json=payload)
+
+        # Parse response into SuggestedMemory objects
+        suggestions = response.get('suggestions', [])
+        return [SuggestedMemory.from_dict(s) for s in suggestions]
+
+    def get_learning_metrics(self, days: int = 30) -> LearningMetrics:
+        """
+        Get learning metrics showing memory usage patterns.
+
+        Args:
+            days: Number of days to analyze (default: 30)
+
+        Returns:
+            LearningMetrics object
+
+        Example:
+            >>> metrics = rb.get_learning_metrics(days=7)
+            >>> print(f"Average helpfulness: {metrics.avg_helpfulness}")
+            >>> print(f"Active memories: {metrics.active_memories}/{metrics.total_memories}")
+        """
+        # Input validation
+        if not isinstance(days, int) or days < 1 or days > 365:
+            raise ValueError("days must be an integer between 1 and 365")
+
+        params = {"days": days}
+        response = self._request("GET", "/api/v1/learning/metrics", params=params)
+
+        return LearningMetrics.from_dict(response)
+
+    def get_patterns(self, days: int = 30) -> PatternAnalysis:
+        """
+        Analyze patterns in memory usage and access.
+
+        Args:
+            days: Number of days to analyze (default: 30)
+
+        Returns:
+            PatternAnalysis object
+
+        Example:
+            >>> patterns = rb.get_patterns(days=14)
+            >>> print(f"Summary: {patterns.summary}")
+            >>> print(f"Useful tags: {', '.join(patterns.most_useful_tags)}")
+        """
+        # Input validation
+        if not isinstance(days, int) or days < 1 or days > 365:
+            raise ValueError("days must be an integer between 1 and 365")
+
+        params = {"days": days}
+        response = self._request("GET", "/api/v1/memories/meta/patterns", params=params)
+
+        return PatternAnalysis.from_dict(response)
+
+    def search_weighted(
+        self,
+        query: str,
+        limit: int = 10,
+        weight_by_usage: bool = False,
+        decay_old_memories: bool = False,
+        adaptive_weights: bool = True,
+        min_helpfulness_score: Optional[float] = None
+    ) -> List[WeightedSearchResult]:
+        """
+        Search memories with intelligent weighting based on usage, helpfulness, and recency.
+
+        Args:
+            query: Search query string
+            limit: Maximum number of results (default: 10)
+            weight_by_usage: Boost frequently used memories (default: False)
+            decay_old_memories: Reduce score for old memories (default: False)
+            adaptive_weights: Use adaptive weighting algorithm (default: True)
+            min_helpfulness_score: Minimum helpfulness score filter (optional)
+
+        Returns:
+            List of WeightedSearchResult objects
+
+        Example:
+            >>> results = rb.search_weighted(
+            >>>     "authentication",
+            >>>     weight_by_usage=True,
+            >>>     min_helpfulness_score=0.7
+            >>> )
+            >>> for result in results:
+            >>>     print(f"{result.text} (score: {result.relevance_score})")
+        """
+        # Input validation
+        if not query:
+            raise ValueError("query is required")
+
+        if limit < 1 or limit > 100:
+            raise ValueError("limit must be between 1 and 100")
+
+        if min_helpfulness_score is not None:
+            if not 0.0 <= min_helpfulness_score <= 1.0:
+                raise ValueError("min_helpfulness_score must be between 0.0 and 1.0")
+
+        payload = {
+            "query": self._sanitize_input(query),
+            "limit": limit,
+            "weight_by_usage": weight_by_usage,
+            "decay_old_memories": decay_old_memories,
+            "adaptive_weights": adaptive_weights
+        }
+
+        if min_helpfulness_score is not None:
+            payload["min_helpfulness_score"] = min_helpfulness_score
+
+        response = self._request("POST", "/api/v1/memories/search", json=payload)
+
+        # Parse response into WeightedSearchResult objects
+        results = response.get('results', [])
+        return [WeightedSearchResult.from_dict(r) for r in results]

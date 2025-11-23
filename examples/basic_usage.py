@@ -1,11 +1,21 @@
 """
 RecallBricks - Basic Usage Example
+
+This example demonstrates both authentication methods:
+1. API key - for user-level access
+2. Service token - for server-to-server access
 """
 
 from recallbricks import RecallBricks
 
-# Initialize with your API key
+# Option 1: Initialize with API key (user-level access)
 memory = RecallBricks(api_key="rb_dev_zrWnAmVlGkbtNwy0wyfG_secret_2025")
+
+# Option 2: Initialize with service token (server-to-server access)
+# Uncomment to use service token instead:
+# memory = RecallBricks(service_token="rbk_service_xxx")
+
+print(f"Authenticated using: {'service token' if memory.service_token else 'API key'}")
 
 # Save a memory
 print("Saving memory...")
