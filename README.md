@@ -2,7 +2,7 @@
 
 **Enterprise-Grade Memory Layer for AI** - Persistent, intelligent memory across all AI models with advanced metacognition features.
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://pypi.org/project/recallbricks/)
+[![Version](https://img.shields.io/badge/version-1.3.0-blue.svg)](https://pypi.org/project/recallbricks/)
 [![Python](https://img.shields.io/badge/python-3.8+-green.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
@@ -207,8 +207,8 @@ memory = rb.save("Important data")  # Retries up to 3 times on failure
 
 ### Core Methods
 
-#### `save(text, source="api", project_id="default", tags=None, metadata=None, max_retries=3)`
-Save a new memory with automatic retry on failure.
+#### `save(text, user_id=None, source="api", project_id="default", tags=None, metadata=None, max_retries=3)`
+Save a new memory with automatic retry on failure. Note: `user_id` is required when using service token authentication.
 
 #### `get_all(limit=None)`
 Retrieve all memories.

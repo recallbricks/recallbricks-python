@@ -40,7 +40,7 @@ class RecallBricks:
         self,
         api_key: Optional[str] = None,
         service_token: Optional[str] = None,
-        base_url: str = "https://recallbricks-api-clean.onrender.com",
+        base_url: str = "https://api.recallbricks.com/api/v1",
         timeout: int = 30
     ):
         """
@@ -272,76 +272,51 @@ class RecallBricks:
         if metadata:
             payload["metadata"] = metadata
 
-        # Retry logic with exponential backoff
-        for attempt in range(max_retries):
-            try:
-                return self._request("POST", "/api/v1/memories", json=payload)
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
-                    print(f"Save failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s...")
-                    time.sleep(wait_time)
-                else:
-                    raise RecallBricksError(f"Failed to save after {max_retries} attempts: {e}")
+        return self._request("POST", "/memories", json=payload, max_retries=max_retries)
     
-    def get_all(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    def get_all(self, limit: Optional[int] = None) -> Dict[str, Any]:
         """
         Get all memories.
-        
+
         Args:
             limit: Optional limit on number of memories to return
-            
+
         Returns:
-            List of memory dictionaries
-            
+            Dictionary with 'memories' list and 'count'
+
         Example:
-            >>> all_memories = memory.get_all(limit=10)
+            >>> response = memory.get_all(limit=10)
+            >>> for mem in response['memories']:
+            >>>     print(mem['text'])
         """
         params = {}
         if limit:
             params['limit'] = limit
-            
-        response = self._request("GET", "/api/v1/memories", params=params)
-        return response.get('memories', [])
+
+        return self._request("GET", "/memories", params=params)
     
-    def search(self, query: str, limit: int = 10, include_relationships: bool = False) -> List[Dict[str, Any]]:
+    def search(self, query: str, limit: int = 10) -> Dict[str, Any]:
         """
-        Search memories by text.
+        Search memories by semantic similarity.
 
         Args:
             query: Search query
             limit: Maximum number of results (default: 10)
-            include_relationships: Include relationship data in results (default: False)
 
         Returns:
-            List of matching memory dictionaries
+            Dictionary with 'memories' list and 'count'
 
         Example:
             >>> results = memory.search("dark mode", limit=5)
-            >>> results_with_rels = memory.search("dark mode", include_relationships=True)
+            >>> for mem in results['memories']:
+            >>>     print(mem['text'])
         """
-        # Simple client-side search for now
-        # TODO: Add server-side search endpoint
-        all_memories = self.get_all()
-        query_lower = query.lower()
+        payload = {
+            "query": self._sanitize_input(query),
+            "limit": limit
+        }
 
-        matches = [
-            m for m in all_memories
-            if query_lower in m.get('text', '').lower()
-        ]
-
-        results = matches[:limit]
-
-        # Optionally fetch relationships for each result
-        if include_relationships:
-            for memory in results:
-                try:
-                    memory['relationships'] = self.get_relationships(memory['id'])
-                except Exception as e:
-                    # If relationship fetch fails, just skip it
-                    memory['relationships'] = None
-
-        return results
+        return self._request("POST", "/memories/search", json=payload)
     
     def get(self, memory_id: str) -> Dict[str, Any]:
         """
@@ -356,7 +331,7 @@ class RecallBricks:
         Example:
             >>> specific = memory.get("123e4567-e89b-12d3-a456-426614174000")
         """
-        return self._request("GET", f"/api/v1/memories/{memory_id}")
+        return self._request("GET", f"/memories/{memory_id}")
     
     def delete(self, memory_id: str) -> Dict[str, Any]:
         """
@@ -371,8 +346,59 @@ class RecallBricks:
         Example:
             >>> memory.delete("123e4567-e89b-12d3-a456-426614174000")
         """
-        return self._request("DELETE", f"/api/v1/memories/{memory_id}")
-    
+        return self._request("DELETE", f"/memories/{memory_id}")
+
+    def update(
+        self,
+        memory_id: str,
+        text: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Update an existing memory.
+
+        Args:
+            memory_id: The memory ID to update
+            text: New text content (optional)
+            tags: New tags list (optional)
+            metadata: New metadata dictionary (optional)
+
+        Returns:
+            Updated memory dictionary
+
+        Example:
+            >>> memory.update("123e4567-...", text="Updated content", tags=["new-tag"])
+        """
+        if not memory_id:
+            raise ValueError("memory_id is required")
+
+        payload = {}
+        if text is not None:
+            payload["text"] = self._sanitize_input(text)
+        if tags is not None:
+            payload["tags"] = tags
+        if metadata is not None:
+            payload["metadata"] = metadata
+
+        if not payload:
+            raise ValueError("At least one field (text, tags, or metadata) must be provided")
+
+        return self._request("PUT", f"/memories/{memory_id}", json=payload)
+
+    def health(self) -> Dict[str, Any]:
+        """
+        Check API health status.
+
+        Returns:
+            Dictionary with health status
+
+        Example:
+            >>> status = memory.health()
+            >>> print(f"API status: {status['status']}")
+        """
+        return self._request("GET", "/health")
+
     def get_rate_limit(self) -> Dict[str, Any]:
         """
         Get current rate limit status.
@@ -384,7 +410,7 @@ class RecallBricks:
             >>> status = memory.get_rate_limit()
             >>> print(f"Remaining: {status['remaining']}/{status['limit']}")
         """
-        return self._request("GET", "/api/v1/rate-limit")
+        return self._request("GET", "/rate-limit")
 
     def get_relationships(self, memory_id: str) -> Dict[str, Any]:
         """
@@ -410,7 +436,7 @@ class RecallBricks:
         if not isinstance(memory_id, str):
             raise TypeError(f"memory_id must be a string, got {type(memory_id).__name__}")
 
-        response = self._request("GET", f"/api/v1/relationships/memory/{memory_id}")
+        response = self._request("GET", f"/relationships/memory/{memory_id}")
 
         # Validate response structure
         if response is None:
@@ -460,7 +486,7 @@ class RecallBricks:
             raise ValueError(f"depth must be non-negative, got {depth}")
 
         params = {"depth": depth}
-        response = self._request("GET", f"/api/v1/relationships/graph/{memory_id}", params=params)
+        response = self._request("GET", f"/relationships/graph/{memory_id}", params=params)
 
         # Validate response structure
         if response is None:
@@ -567,7 +593,7 @@ class RecallBricks:
                 sanitized_ids.append(self._sanitize_input(mem_id, max_length=256))
             payload["recent_memory_ids"] = sanitized_ids
 
-        response = self._request("POST", "/api/v1/memories/predict", json=payload)
+        response = self._request("POST", "/memories/predict", json=payload)
 
         # Parse response into PredictedMemory objects
         predictions = response.get('predictions', [])
@@ -614,7 +640,7 @@ class RecallBricks:
             "include_reasoning": include_reasoning
         }
 
-        response = self._request("POST", "/api/v1/memories/suggest", json=payload)
+        response = self._request("POST", "/memories/suggest", json=payload)
 
         # Parse response into SuggestedMemory objects
         suggestions = response.get('suggestions', [])
@@ -640,7 +666,7 @@ class RecallBricks:
             raise ValueError("days must be an integer between 1 and 365")
 
         params = {"days": days}
-        response = self._request("GET", "/api/v1/learning/metrics", params=params)
+        response = self._request("GET", "/learning/metrics", params=params)
 
         return LearningMetrics.from_dict(response)
 
@@ -664,7 +690,7 @@ class RecallBricks:
             raise ValueError("days must be an integer between 1 and 365")
 
         params = {"days": days}
-        response = self._request("GET", "/api/v1/memories/meta/patterns", params=params)
+        response = self._request("GET", "/memories/meta/patterns", params=params)
 
         return PatternAnalysis.from_dict(response)
 
@@ -722,7 +748,7 @@ class RecallBricks:
         if min_helpfulness_score is not None:
             payload["min_helpfulness_score"] = min_helpfulness_score
 
-        response = self._request("POST", "/api/v1/memories/search", json=payload)
+        response = self._request("POST", "/memories/search", json=payload)
 
         # Parse response into WeightedSearchResult objects
         results = response.get('results', [])

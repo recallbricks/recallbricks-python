@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="recallbricks",
-    version="1.1.1",
+    version="1.4.0",
     author="RecallBricks",
     author_email="support@recallbricks.com",
     description="Enterprise-Grade Memory Layer for AI - Persistent memory with advanced metacognition",
