@@ -1,10 +1,15 @@
 """
 RecallBricks SDK Type Definitions
 Phase 2A Metacognition Features
+Phase 2B Automatic Metatags Features
 """
 
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
+try:
+    from typing import TypedDict
+except ImportError:
+    from typing_extensions import TypedDict
 
 
 @dataclass
@@ -140,4 +145,88 @@ class WeightedSearchResult:
             usage_boost=data.get('usage_boost', 0.0),
             helpfulness_boost=data.get('helpfulness_boost', 0.0),
             recency_boost=data.get('recency_boost', 0.0)
+        )
+
+
+# Phase 2B: Automatic Metatags TypedDict definitions
+
+class MemoryMetadata(TypedDict, total=False):
+    """Metadata auto-generated or user-provided for a memory"""
+    tags: List[str]
+    category: str
+    entities: List[str]
+    importance: float
+    summary: str
+
+
+class CategorySummary(TypedDict):
+    """Summary information for a category of memories"""
+    count: int
+    avg_score: float
+    summary: str
+
+
+class RecallMemory(TypedDict, total=False):
+    """A memory item returned from recall"""
+    id: str
+    text: str
+    metadata: MemoryMetadata
+    score: float
+    created_at: str
+    source: str
+    project_id: str
+
+
+class RecallResponse(TypedDict, total=False):
+    """Response from the enhanced recall endpoint"""
+    memories: List[RecallMemory]
+    categories: Dict[str, CategorySummary]
+    total: int
+    count: int  # backward compatibility
+
+
+@dataclass
+class LearnedMemory:
+    """Represents a memory saved with auto-generated metadata"""
+    id: str
+    text: str
+    metadata: MemoryMetadata
+    created_at: str
+    source: str = "python-sdk"
+    project_id: str = "default"
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'LearnedMemory':
+        """Create LearnedMemory from API response"""
+        metadata = data.get('metadata', {})
+        return cls(
+            id=data.get('id', ''),
+            text=data.get('text', ''),
+            metadata=MemoryMetadata(
+                tags=metadata.get('tags', []),
+                category=metadata.get('category', ''),
+                entities=metadata.get('entities', []),
+                importance=metadata.get('importance', 0.0),
+                summary=metadata.get('summary', '')
+            ),
+            created_at=data.get('created_at', ''),
+            source=data.get('source', 'python-sdk'),
+            project_id=data.get('project_id', 'default')
+        )
+
+
+@dataclass
+class OrganizedRecallResult:
+    """Represents organized recall results with category summaries"""
+    memories: List[RecallMemory]
+    categories: Dict[str, CategorySummary]
+    total: int
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'OrganizedRecallResult':
+        """Create OrganizedRecallResult from API response"""
+        return cls(
+            memories=data.get('memories', []),
+            categories=data.get('categories', {}),
+            total=data.get('total', data.get('count', 0))
         )

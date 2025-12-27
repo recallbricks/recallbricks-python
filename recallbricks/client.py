@@ -8,14 +8,27 @@ import functools
 import time
 import re
 from typing import List, Dict, Optional, Any
-from .exceptions import AuthenticationError, RateLimitError, APIError, RecallBricksError
+from .exceptions import (
+    AuthenticationError,
+    RateLimitError,
+    APIError,
+    RecallBricksError,
+    ValidationError,
+    NotFoundError
+)
 from .types import (
     PredictedMemory,
     SuggestedMemory,
     LearningMetrics,
     PatternAnalysis,
-    WeightedSearchResult
+    WeightedSearchResult,
+    MemoryMetadata,
+    CategorySummary,
+    RecallResponse,
+    LearnedMemory,
+    OrganizedRecallResult
 )
+import warnings
 
 
 class RecallBricks:
@@ -105,6 +118,32 @@ class RecallBricks:
 
         return sanitized
 
+    def _parse_error_response(self, response) -> Dict[str, Any]:
+        """
+        Parse error response from production API.
+
+        Production API error format:
+        {
+            "error": {
+                "code": "ERROR_CODE",
+                "message": "Human readable message",
+                "hint": "Helpful hint for resolution",
+                "requestId": "uuid",
+                "timestamp": "ISO timestamp"
+            }
+        }
+        """
+        try:
+            if not response.content:
+                return {}
+            data = response.json()
+            # Handle nested error format
+            if 'error' in data and isinstance(data['error'], dict):
+                return data['error']
+            return data
+        except (ValueError, KeyError):
+            return {}
+
     def _request(self, method: str, endpoint: str, max_retries: int = 3, **kwargs) -> Dict[str, Any]:
         """
         Make HTTP request to RecallBricks API with retry logic
@@ -132,21 +171,47 @@ class RecallBricks:
 
                 # Handle rate limiting with retry
                 if response.status_code == 429:
+                    error_data = self._parse_error_response(response)
                     retry_after = response.headers.get('X-RateLimit-Reset', '60')
-                    wait_time = min(int(retry_after) if retry_after.isdigit() else 60, 60)
+                    wait_time = min(int(retry_after) if str(retry_after).isdigit() else 60, 60)
 
                     if attempt < max_retries - 1:
                         time.sleep(wait_time)
                         continue
                     else:
                         raise RateLimitError(
-                            "Rate limit exceeded. Please try again later.",
-                            retry_after=retry_after
+                            error_data.get('message', 'Rate limit exceeded. Please try again later.'),
+                            retry_after=retry_after,
+                            code=error_data.get('code', 'RATE_LIMIT_EXCEEDED'),
+                            hint=error_data.get('hint'),
+                            request_id=error_data.get('requestId')
                         )
 
                 # Handle authentication errors
                 if response.status_code == 401:
-                    raise AuthenticationError("Invalid API key")
+                    error_data = self._parse_error_response(response)
+                    raise AuthenticationError(
+                        error_data.get('message', 'Invalid API key'),
+                        code=error_data.get('code', 'INVALID_API_KEY'),
+                        hint=error_data.get('hint'),
+                        request_id=error_data.get('requestId')
+                    )
+
+                # Handle not found errors
+                if response.status_code == 404:
+                    error_data = self._parse_error_response(response)
+                    raise NotFoundError(
+                        error_data.get('message', 'Resource not found'),
+                        request_id=error_data.get('requestId')
+                    )
+
+                # Handle validation errors
+                if response.status_code == 400:
+                    error_data = self._parse_error_response(response)
+                    raise ValidationError(
+                        error_data.get('message', 'Validation error'),
+                        code=error_data.get('code', 'VALIDATION_ERROR')
+                    )
 
                 # Handle server errors with retry
                 if response.status_code >= 500:
@@ -155,21 +220,24 @@ class RecallBricks:
                         time.sleep(wait_time)
                         continue
                     else:
-                        error_data = response.json() if response.content else {}
+                        error_data = self._parse_error_response(response)
                         raise APIError(
                             error_data.get('message', 'Server error'),
-                            status_code=response.status_code
+                            status_code=response.status_code,
+                            code=error_data.get('code', 'SERVER_ERROR'),
+                            hint=error_data.get('hint'),
+                            request_id=error_data.get('requestId')
                         )
 
                 # Handle other client errors
                 if response.status_code >= 400:
-                    try:
-                        error_data = response.json() if response.content else {}
-                    except ValueError:
-                        error_data = {}
+                    error_data = self._parse_error_response(response)
                     raise APIError(
                         error_data.get('message', 'API request failed'),
-                        status_code=response.status_code
+                        status_code=response.status_code,
+                        code=error_data.get('code'),
+                        hint=error_data.get('hint'),
+                        request_id=error_data.get('requestId')
                     )
 
                 # Parse JSON response
@@ -185,7 +253,10 @@ class RecallBricks:
                     time.sleep(wait_time)
                     continue
                 else:
-                    raise RecallBricksError(f"Request timeout after {max_retries} attempts")
+                    raise RecallBricksError(
+                        f"Request timeout after {max_retries} attempts",
+                        code="TIMEOUT"
+                    )
 
             except requests.exceptions.ConnectionError as e:
                 last_exception = e
@@ -194,15 +265,21 @@ class RecallBricks:
                     time.sleep(wait_time)
                     continue
                 else:
-                    raise RecallBricksError(f"Connection error after {max_retries} attempts: {str(e)}")
+                    raise RecallBricksError(
+                        f"Connection error after {max_retries} attempts: {str(e)}",
+                        code="CONNECTION_ERROR"
+                    )
 
             except requests.exceptions.RequestException as e:
                 # Other request exceptions - don't retry
-                raise RecallBricksError(f"Network error: {str(e)}")
+                raise RecallBricksError(f"Network error: {str(e)}", code="NETWORK_ERROR")
 
         # Should not reach here, but just in case
         if last_exception:
-            raise RecallBricksError(f"Request failed after {max_retries} attempts: {str(last_exception)}")
+            raise RecallBricksError(
+                f"Request failed after {max_retries} attempts: {str(last_exception)}",
+                code="MAX_RETRIES_EXCEEDED"
+            )
     
     def save(
         self,
@@ -273,7 +350,265 @@ class RecallBricks:
             payload["metadata"] = metadata
 
         return self._request("POST", "/memories", json=payload, max_retries=max_retries)
-    
+
+    def learn(
+        self,
+        text: str,
+        user_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+        source: str = "python-sdk",
+        metadata: Optional[Dict[str, Any]] = None,
+        max_retries: int = 3
+    ) -> Dict[str, Any]:
+        """
+        Store a memory with automatic metadata extraction.
+
+        This method uses the /api/v1/memories/learn endpoint which automatically
+        extracts tags, categories, entities, importance levels, and summaries
+        from the memory content. This reduces agent reasoning time from 10-15
+        seconds to 2-3 seconds (3-5x faster).
+
+        Args:
+            text: Memory content to learn
+            user_id: User ID to associate with the memory. Required when using
+                    service token authentication.
+            project_id: Optional project identifier
+            source: Source identifier (default: python-sdk)
+            metadata: Optional metadata overrides. Can include:
+                     - tags: List[str] - Custom tags to add/override
+                     - category: str - Custom category override
+            max_retries: Maximum number of retry attempts (default: 3)
+
+        Returns:
+            Dict containing memory ID and auto-generated metadata:
+            {
+                "id": "uuid",
+                "text": "Memory content",
+                "metadata": {
+                    "tags": ["auto", "generated", "tags"],
+                    "category": "Work",
+                    "entities": ["Python", "RecallBricks"],
+                    "importance": 0.85,
+                    "summary": "AI-generated summary"
+                },
+                "created_at": "timestamp"
+            }
+
+        Raises:
+            ValueError: If user_id is required but not provided
+            TypeError: If text is not a string
+
+        Example:
+            >>> # Basic usage
+            >>> result = rb.learn("User prefers dark mode and TypeScript")
+            >>> print(f"Auto-tags: {result['metadata']['tags']}")
+
+            >>> # With metadata overrides
+            >>> result = rb.learn(
+            ...     "Fixed authentication bug",
+            ...     metadata={"tags": ["bugfix"], "category": "Development"}
+            ... )
+
+            >>> # With service token (user_id required)
+            >>> result = rb.learn(
+            ...     "Customer prefers email notifications",
+            ...     user_id="user_123"
+            ... )
+        """
+        # Validate user_id when using service token
+        if self.service_token and not user_id:
+            raise ValueError(
+                "user_id is required when using service token authentication. "
+                "Please provide a user_id parameter to identify the user."
+            )
+
+        # Validate and sanitize text
+        if not isinstance(text, str):
+            raise TypeError(f"text must be a string, got {type(text).__name__}")
+        if not text.strip():
+            raise ValueError("text cannot be empty")
+
+        # Validate user_id format if provided
+        if user_id is not None:
+            if not isinstance(user_id, str):
+                raise TypeError(f"user_id must be a string, got {type(user_id).__name__}")
+            if not user_id.strip():
+                raise ValueError("user_id cannot be empty")
+            user_id = self._sanitize_input(user_id, max_length=256)
+
+        payload = {
+            "text": self._sanitize_input(text),
+            "source": source,
+        }
+
+        if user_id:
+            payload["user_id"] = user_id
+
+        if project_id:
+            payload["project_id"] = project_id
+
+        if metadata:
+            payload["metadata"] = metadata
+
+        return self._request("POST", "/memories/learn", json=payload, max_retries=max_retries)
+
+    def save_memory(
+        self,
+        text: str,
+        user_id: Optional[str] = None,
+        source: str = "api",
+        project_id: str = "default",
+        tags: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        max_retries: int = 3
+    ) -> Dict[str, Any]:
+        """
+        Save a new memory (deprecated - use learn() instead).
+
+        .. deprecated::
+            Use :meth:`learn` instead for automatic metadata extraction.
+            This method will be removed in a future version.
+
+        Args:
+            text: The memory content to save
+            user_id: User ID to associate with the memory
+            source: Source of the memory (default: "api")
+            project_id: Project identifier (default: "default")
+            tags: Optional list of tags (ignored - use learn() for auto-tags)
+            metadata: Optional metadata dictionary
+            max_retries: Maximum number of retry attempts (default: 3)
+
+        Returns:
+            Dictionary containing the created memory with id, created_at, etc.
+        """
+        warnings.warn(
+            "save_memory() is deprecated and will be removed in a future version. "
+            "Use learn() instead for automatic metadata extraction which provides "
+            "auto-generated tags, categories, entities, and summaries.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        return self.save(
+            text=text,
+            user_id=user_id,
+            source=source,
+            project_id=project_id,
+            tags=tags,
+            metadata=metadata,
+            max_retries=max_retries
+        )
+
+    def recall(
+        self,
+        query: str,
+        limit: int = 10,
+        min_helpfulness_score: Optional[float] = None,
+        organized: bool = False,
+        user_id: Optional[str] = None,
+        project_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Recall memories with semantic search and optional organization.
+
+        This method uses the enhanced /api/v1/memories/recall endpoint which
+        returns organized results with category summaries when organized=True.
+
+        Args:
+            query: Search query text
+            limit: Maximum number of results (default: 10)
+            min_helpfulness_score: Minimum helpfulness score filter (0.0-1.0)
+            organized: If True, returns results organized by category with summaries
+            user_id: User ID filter. Required when using service token authentication.
+            project_id: Optional project ID filter
+
+        Returns:
+            If organized=False (default):
+            {
+                "memories": [...],
+                "count": 10
+            }
+
+            If organized=True:
+            {
+                "memories": [
+                    {
+                        "id": "uuid",
+                        "text": "Memory content",
+                        "metadata": {
+                            "tags": ["tag1"],
+                            "category": "Work",
+                            "summary": "Brief summary"
+                        },
+                        "score": 0.92
+                    }
+                ],
+                "categories": {
+                    "Work": {
+                        "count": 5,
+                        "avg_score": 0.85,
+                        "summary": "Work-related memories about Python development"
+                    }
+                },
+                "total": 7
+            }
+
+        Raises:
+            ValueError: If query is empty or min_helpfulness_score is out of range
+            TypeError: If query is not a string
+
+        Example:
+            >>> # Basic recall
+            >>> results = rb.recall("authentication", limit=5)
+            >>> for mem in results['memories']:
+            ...     print(mem['text'])
+
+            >>> # Organized recall with category summaries
+            >>> results = rb.recall("user preferences", organized=True)
+            >>> for category, info in results['categories'].items():
+            ...     print(f"{category}: {info['count']} memories")
+            ...     print(f"  Summary: {info['summary']}")
+
+            >>> # With helpfulness filter
+            >>> results = rb.recall("bugs", min_helpfulness_score=0.7)
+        """
+        # Validate user_id when using service token
+        if self.service_token and not user_id:
+            raise ValueError(
+                "user_id is required when using service token authentication. "
+                "Please provide a user_id parameter to identify the user."
+            )
+
+        # Validate query
+        if not isinstance(query, str):
+            raise TypeError(f"query must be a string, got {type(query).__name__}")
+        if not query.strip():
+            raise ValueError("query cannot be empty")
+
+        # Validate min_helpfulness_score
+        if min_helpfulness_score is not None:
+            if not 0.0 <= min_helpfulness_score <= 1.0:
+                raise ValueError("min_helpfulness_score must be between 0.0 and 1.0")
+
+        # Build payload for POST request
+        payload = {
+            "query": self._sanitize_input(query),
+            "limit": limit
+        }
+
+        if min_helpfulness_score is not None:
+            payload["min_helpfulness_score"] = min_helpfulness_score
+
+        if organized:
+            payload["organized"] = True
+
+        if user_id:
+            payload["user_id"] = self._sanitize_input(user_id, max_length=256)
+
+        if project_id:
+            payload["project_id"] = project_id
+
+        return self._request("POST", "/memories/recall", json=payload)
+
     def get_all(self, limit: Optional[int] = None) -> Dict[str, Any]:
         """
         Get all memories.

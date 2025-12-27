@@ -5,10 +5,10 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="recallbricks",
-    version="1.4.0",
+    version="1.3.0",
     author="RecallBricks",
     author_email="support@recallbricks.com",
-    description="Enterprise-Grade Memory Layer for AI - Persistent memory with advanced metacognition",
+    description="Enterprise-Grade Memory Layer for AI - Persistent memory with autonomous agent features",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/recallbricks/recallbricks-python",
